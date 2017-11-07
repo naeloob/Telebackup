@@ -1,4 +1,5 @@
 import sqlite3
+import struct
 
 from os import path, makedirs
 
@@ -9,7 +10,7 @@ from telethon.tl.types import \
     Chat, ChatEmpty, ChatForbidden, \
     Channel, ChannelForbidden
 
-from telethon.extensions import BinaryReader, BinaryWriter
+from telethon.extensions import BinaryReader#, BinaryWriter
 
 
 class TLDatabase:
@@ -117,17 +118,23 @@ class TLDatabase:
         if not tlobject:
             return None
 
-        with BinaryWriter() as writer:
-            writer.tgwrite_object(tlobject)
-            return writer.get_bytes()
+        #with BinaryWriter() as writer:
+        #    writer.tgwrite_object(tlobject)
+        #    return writer.get_bytes()
+        return tlobject.__bytes__()
 
     @staticmethod
     def adapt_vector(vector):
         """Adapts a vector of TLObjects to an sql type"""
-        with BinaryWriter() as writer:
-            writer.tgwrite_vector(vector if vector is not None else [])
-            return writer.get_bytes()
+        #with BinaryWriter() as writer:
+        #    writer.tgwrite_vector(vector if vector is not None else [])
+        #    return writer.get_bytes()
 
+        return b''.join((
+              b'\x15\xc4\xb5\x1c',
+              struct.pack('<i', len(vector)),
+              b''.join(x.__bytes__() for x in vector),
+        )) if vector is not None else b''
     #endregion
 
     #region SQL -> Python types
@@ -289,7 +296,7 @@ class TLDatabase:
                    msg.via_bot_id,
                    msg.reply_to_msg_id,
                    self.adapt_object(msg.media),
-                   type(msg.media).constructor_id if msg.media else None,
+                   type(msg.media).CONSTRUCTOR_ID if msg.media else None,
                    self.adapt_vector(msg.entities),
                    None,
                    None))
@@ -315,7 +322,7 @@ class TLDatabase:
                    None,
                    None,
                    self.adapt_object(msg.action),
-                   type(msg.action).constructor_id if msg.action else None))
+                   type(msg.action).CONSTRUCTOR_ID if msg.action else None))
 
     def add_user(self, user, replace=False):
         """Adds an user TLObject to its table"""

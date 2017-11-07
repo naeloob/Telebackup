@@ -3,7 +3,7 @@ from pathlib import Path
 
 from telethon.tl.types import \
     User, \
-    MessageMediaPhoto, MessageMediaDocument, \
+    Message, MessageMediaContact, MessageMediaPhoto, MessageMediaDocument, \
     DocumentAttributeAnimated, DocumentAttributeAudio, \
     DocumentAttributeVideo, DocumentAttributeSticker, \
     DocumentAttributeFilename
@@ -96,14 +96,16 @@ class MediaHandler:
 
     #region Message media file paths
 
-    def get_msg_media_path(self, msg):
+    def get_msg_media_path(self, msg, saveName=False):
         result = None
         if isinstance(msg.media, MessageMediaPhoto):
+            media_type = 'photos'
             result = path.join(self.directories['photos'], '{}{}'
                                .format(msg.media.photo.id, get_extension(msg.media)))
 
         if isinstance(msg.media, MessageMediaDocument):
             media_type = None
+            name = None
             for attr in msg.media.document.attributes:
                 if isinstance(attr, DocumentAttributeAnimated):
                     media_type = 'gifs'
@@ -119,16 +121,57 @@ class MediaHandler:
                     break
                 if isinstance(attr, DocumentAttributeFilename):
                     media_type = 'documents'
+                    #name = attr.file_name
                     break
             if not media_type:
                 return None
 
             result = path.join(self.directories[media_type], '{}{}'
-                               .format(msg.media.document.id, get_extension(msg.media)))
+                               .format(name if saveName and name else msg.media.document.id , get_extension(msg.media)))
         if result:
-            return path.abspath(result)
+            return path.abspath(result) if not saveName else path.abspath(path.join(self.directories[media_type],''))
 
     #endregion
+
+    #region Message media file name
+
+    def get_msg_media_name(self, msg, file, saveName=False):
+        if isinstance(msg, Message):
+            date = msg.date
+            media = msg.media
+        else:
+            date = datetime.now()
+            media = msg
+
+        possible_names = []
+        if isinstance(media, MessageMediaPhoto):
+            kind = 'photo'
+            extension = '.jpg'
+            possible_names = None
+        elif isinstance(media, MessageMediaDocument):
+            kind = 'document'
+            document = media.document
+            extension = get_extension(media)
+            for attr in document.attributes:
+                if isinstance(attr, DocumentAttributeFilename):
+                    possible_names.insert(0, attr.file_name)
+
+                elif isinstance(attr, DocumentAttributeAudio):
+                    possible_names.append('{} - {}'.format(
+                        attr.performer, attr.title
+                    ))
+        elif isinstance(media, MessageMediaContact):
+            first_name = media.first_name
+            last_name = media.last_name
+            phone_number = media.phone_number
+
+            kind = 'contact'
+            extension = '.vcard'
+            possible_names = [first_name, phone_number, last_name]
+
+        return file, kind, extension,date, possible_names
+    #endregion
+
 
     """
     'propic': path.join(self.directories['propics'],

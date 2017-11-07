@@ -1,7 +1,7 @@
 import json
 import shutil
 from datetime import timedelta, datetime
-from os import path, listdir, remove
+from os import path, listdir, remove, symlink
 from os.path import isfile, isdir
 from threading import Thread
 from time import sleep
@@ -9,14 +9,16 @@ from time import sleep
 import telethon.tl.all_tlobjects as all_tlobjects
 from telethon.errors import RPCError, TypeNotFoundError
 from telethon.tl.functions.messages import GetHistoryRequest
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, DocumentAttributeFilename
 from telethon.tl.types.messages import Messages, MessagesSlice, ChannelMessages
-from telethon.extensions import BinaryReader, BinaryWriter
+from telethon.extensions import BinaryReader
 
 from media_handler import MediaHandler
 from tl_database import TLDatabase
 
-scheme_layer = all_tlobjects.layer
+import re
+
+scheme_layer = all_tlobjects.LAYER
 del all_tlobjects
 
 
@@ -66,8 +68,9 @@ class Backuper:
 
         # Save the entity and load the metadata
         with open(self.files['entity'], 'wb') as file:
-            with BinaryWriter(file) as writer:
-                entity.on_send(writer)
+            #with BinaryWriter(file) as writer:
+            #    entity.on_send(writer)
+            file.write(entity.__bytes__())
         self.metadata = self.load_metadata()
 
     #endregion
@@ -310,8 +313,7 @@ class Backuper:
             if not isfile(filename):
                 # Only download the file if it doesn't exist yet
                 self.client.download_profile_photo(self.entity.photo,
-                                                   file_path=filename,
-                                                   add_extension=False)
+                                                   file=filename)
                 # If we downloaded a new version, copy it to the "default" generic file
                 if isfile(generic_filename):
                     remove(generic_filename)
@@ -341,9 +343,9 @@ class Backuper:
 
             return total_size
 
-    def backup_media_thread(self, dl_propics, dl_photos, dl_docs,
+    def backup_media_thread(self, dl_propics, dl_photos, dl_docs, saveName=None,
                             docs_max_size=None, before_date=None, after_date=None,
-                            progress_callback=None):
+                            progress_callback=None, filter=None):
         """Backups the specified media contained in the given database file"""
         self.backup_running = True
 
@@ -368,7 +370,7 @@ class Backuper:
                 try:
                     if not self.valid_file_exists(output):
                         self.client.download_profile_photo(
-                            user.photo, add_extension=False, file_path=output)
+                            user.photo, file=output)
                         sleep(self.download_delay)
 
                 except RPCError as e:
@@ -383,11 +385,13 @@ class Backuper:
                 if not self.backup_running:
                     return
                 # Try downloading the photo
-                output = self.media_handler.get_msg_media_path(msg)
+                output = self.media_handler.get_msg_media_path(msg,saveName)
+                if saveName :
+                    output = self._get_proper_filename(*self.media_handler.get_msg_media_name(msg, output))
                 try:
                     if not self.valid_file_exists(output):
-                        self.client.download_msg_media(
-                            msg.media, add_extension=False, file_path=output)
+                        self.client.download_media(
+                            msg.media, file=output)
                         sleep(self.download_delay)
 
                 except RPCError as e:
@@ -399,18 +403,41 @@ class Backuper:
 
         # TODO Add an internal callback to determine how the current document download is going,
         # and update our currently saved bytes count based on that
+        if filter:  
+            r=re.compile(filter)
+            
         if dl_docs:
             for msg in db.query_messages(self.get_query(MessageMediaDocument, before_date, after_date)):
                 if not self.backup_running:
                     return
 
+                if filter: #Try to filter the Download by File_Name of the message document
+                    name = None
+                    for attr in msg.media.document.attributes:
+                        if isinstance(attr, DocumentAttributeFilename):
+                            media_type = 'documents'
+                            name = attr.file_name
+                            break
+                    if name and not r.match(name):
+                        continue
+
                 if not docs_max_size or msg.media.document.size <= docs_max_size:
                     # Try downloading the document
-                    output = self.media_handler.get_msg_media_path(msg)
+                    outputID = self.media_handler.get_msg_media_path(msg)
+                    output = self.media_handler.get_msg_media_path(msg, saveName)
+                    #print (output)
+                    if saveName :
+                        output = self._get_proper_filename(*self.media_handler.get_msg_media_name(msg, output))
+                    #print (output)
                     try:
-                        if not self.valid_file_exists(output):
-                            self.client.download_msg_media(
-                                msg.media, add_extension=False, file_path=output)
+                        if not self.valid_file_exists(output, msg.media.document.size):
+                            if self.valid_file_exists(outputID, msg.media.document.size) and outputID!=output:
+                                if isfile(output):
+                                    remove(output)
+                                symlink(outputID,output)
+                            else:
+                                self.client.download_media(
+                                    msg.media, file=output)
                         sleep(self.download_delay)
 
                     except RPCError as e:
@@ -426,6 +453,56 @@ class Backuper:
     #endregion
 
     #region Utilities
+
+    @staticmethod
+    def _get_proper_filename(file, kind, extension,
+                             date=None, possible_names=None):
+        """Gets a proper filename for 'file', if this is a path.
+
+           'kind' should be the kind of the output file (photo, document...)
+           'extension' should be the extension to be added to the file if
+                       the filename doesn't have any yet
+           'date' should be when this file was originally sent, if known
+           'possible_names' should be an ordered list of possible names
+
+           If no modification is made to the path, any existing file
+           will be overwritten.
+           If any modification is made to the path, this method will
+           ensure that no existing file will be overwritten.
+        """
+        if file is not None and not isinstance(file, str):
+            # Probably a stream-like object, we cannot set a filename here
+            return file
+
+        if file is None:
+            file = ''
+        elif isfile(file):
+            # Make no modifications to valid existing paths
+            return file
+
+        if isdir(file) or not file:
+            try:
+                name = None if possible_names is None else next(
+                    x for x in possible_names if x
+                )
+            except StopIteration:
+                name = None
+
+            if not name:
+                name = '{}_{}-{:02}-{:02}_{:02}-{:02}-{:02}'.format(
+                    kind,
+                    date.year, date.month, date.day,
+                    date.hour, date.minute, date.second,
+                )
+            file = path.join(file, name)
+
+        directory, name = path.split(file)
+        name, ext = path.splitext(name)
+        if not ext:
+            ext = extension
+
+        result = path.join(directory, name + ext)
+        return result
 
     def calculate_etl(self, downloaded, total, start=None):
         """Calculates the estimated time left, based on how long it took us
@@ -457,7 +534,7 @@ class Backuper:
     def get_query(clazz, before_date=None, after_date=None):
         """Returns a database query filtering by media_id (its class),
            and optionally range dates"""
-        filters = 'where media_id = {}'.format(clazz.constructor_id)
+        filters = 'where media_id = {}'.format(clazz.CONSTRUCTOR_ID)
         if before_date:
             filters += " and date <= '{}'".format(before_date)
         if after_date:
@@ -465,9 +542,10 @@ class Backuper:
         return filters
 
     @staticmethod
-    def valid_file_exists(file):
+    def valid_file_exists(file, size = 0):
         """Determines whether a file exists and its "valid"
            (i.e., the file size is greater than 0; if it's 0, it probably faild dueto an RPC error)"""
-        return path.isfile(file) and path.getsize(file) > 0
+        #print (file,isfile(file))#, path.getsize(file))
+        return isfile(file) and path.getsize(file) >= size
 
     #endregion
